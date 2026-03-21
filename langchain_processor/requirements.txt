@@ -1,0 +1,10 @@
+langchain
+python-dotenv
+langchain_groq
+langchain_community
+langchain-core
+pandas
+pydantic
+beautifulsoup4
+tqdm
+langchain-huggingface
