@@ -1,172 +1,193 @@
 import os
 import json
-import time
 import re
 import pandas as pd
 from tqdm import tqdm
-from dotenv import load_dotenv
-from pydantic import BaseModel, Field
-from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
 
 # =========================
-# 1. Setup
+# 1. CATEGORY DETECTION
 # =========================
-load_dotenv()
+def detect_category(title, desc):
+    text = (title + " " + desc).lower()
 
-class JobFeatures(BaseModel):
-    experience_years: int = Field(description="Minimum years of experience (integer)")
-    python_skill: int = Field(description="1 if Python is mentioned, else 0")
-    django_skill: int = Field(description="1 if Django is mentioned, else 0")
-    aws_skill: int = Field(description="1 if AWS is mentioned, else 0")
-    remote_friendly: int = Field(description="1 if remote/hybrid, else 0")
-    salary_min_k: int = Field(description="Minimum salary in thousands (integer)")
-
-# =========================
-# 2. Initialize TinyLlama
-# =========================
-llm = HuggingFaceEndpoint(
-    repo_id="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-    task="text-generation",
-    max_new_tokens=256,
-    temperature=0.1,
-    huggingfacehub_api_token=os.getenv("HUGGING_FACE_API_KEY")
-)
-
-chat_model = ChatHuggingFace(llm=llm)
-parser = JsonOutputParser(pydantic_object=JobFeatures)
+    # prioritize skills over generic titles
+    if any(k in text for k in ["python", "developer", "software", "backend", "frontend", "aws"]):
+        return "tech"
+    elif any(k in text for k in ["nurse", "doctor", "clinical", "medical", "health"]):
+        return "medical"
+    elif any(k in text for k in ["finance", "analyst", "account", "bank", "financial"]):
+        return "finance"
+    else:
+        return "other"
 
 # =========================
-# 3. Prompt (STRONG)
+# 2. EXPERIENCE EXTRACTION
 # =========================
-prompt = ChatPromptTemplate.from_messages([
-    ("system",
-     "You MUST return ONLY valid JSON.\n"
-     "{format_instructions}\n\n"
-     "Rules:\n"
-     "- If experience not found → 0\n"
-     "- If skill not mentioned → 0\n"
-     "- Detect Python, Django, AWS\n"
-     "- Remote includes: remote, hybrid, work from home\n"
-     "- Output ONLY JSON"
-    ),
-    ("human", "Job description:\n{description}")
-])
-
-chain = prompt | chat_model | parser
-
-# =========================
-# 4. Fallback Extraction
-# =========================
-def fallback_extract(desc):
-    desc_lower = desc.lower()
-
-    return {
-        "experience_years": 0,
-        "python_skill": int("python" in desc_lower),
-        "django_skill": int("django" in desc_lower),
-        "aws_skill": int("aws" in desc_lower),
-        "remote_friendly": int(
-            any(word in desc_lower for word in ["remote", "hybrid", "work from home"])
-        ),
-        "salary_min_k": extract_salary(desc)
-    }
-
-# =========================
-# 5. Salary Extraction (Regex)
-# =========================
-def extract_salary(desc):
+def extract_experience(desc):
     desc = desc.lower()
 
-    # Match formats like 80k, 100k
-    match = re.search(r'(\d{2,3})\s?k', desc)
+    # match "3-5 years" or "2 to 4 years"
+    match = re.search(r'(\d+)\s?[-to]+\s?(\d+)\s*(years|yrs)', desc)
     if match:
         return int(match.group(1))
 
-    return 0
+    # match "3+ years"
+    match = re.search(r'(\d+)\+?\s*(years|yrs)', desc)
+    if match:
+        return int(match.group(1))
+
+    # fallback using keywords
+    if "senior" in desc:
+        return 5
+    if "mid" in desc:
+        return 3
+    if "junior" in desc or "entry" in desc:
+        return 1
+
+    return None
 
 # =========================
-# 6. Data Cleaning
+# 3. SALARY EXTRACTION
 # =========================
-def clean_features(f):
+def extract_salary(desc):
+    desc = desc.lower().replace(",", "")
+
+    # only consider salary-related context
+    if not any(k in desc for k in ["salary", "pay", "$", "₹"]):
+        return None
+
+    # range: 50000-70000
+    match = re.search(r'(\d{5,6})\s?[-to]+\s?(\d{5,6})', desc)
+    if match:
+        return int(match.group(1))
+
+    # single number
+    match = re.search(r'\b(\d{5,6})\b', desc)
+    if match:
+        return int(match.group(1))
+
+    # 50k format
+    match = re.search(r'(\d{2,3})\s?k', desc)
+    if match:
+        return int(match.group(1)) * 1000
+
+    return None
+
+# =========================
+# 4. REMOTE DETECTION
+# =========================
+def extract_remote(desc):
+    keywords = ["remote", "work from home", "wfh", "anywhere"]
+    return int(any(k in desc.lower() for k in keywords))
+
+# =========================
+# 5. CATEGORY FEATURES
+# =========================
+def extract_tech(desc):
+    desc = desc.lower()
     return {
-        "experience_years": max(0, int(f.get("experience_years", 0))),
-        "python_skill": int(f.get("python_skill", 0)),
-        "django_skill": int(f.get("django_skill", 0)),
-        "aws_skill": int(f.get("aws_skill", 0)),
-        "remote_friendly": int(f.get("remote_friendly", 0)),
-        "salary_min_k": max(0, int(f.get("salary_min_k", 0))),
+        "python_skill": int("python" in desc),
+        "django_skill": int("django" in desc),
+        "aws_skill": int("aws" in desc or "amazon web services" in desc)
+    }
+
+def extract_medical(desc):
+    desc = desc.lower()
+    return {
+        "medical_license": int("license" in desc),
+        "patient_care": int("patient" in desc),
+        "clinical_experience": int("clinical" in desc)
+    }
+
+def extract_finance(desc):
+    desc = desc.lower()
+    return {
+        "financial_analysis": int("analysis" in desc),
+        "risk_management": int("risk" in desc),
+        "accounting": int("account" in desc)
     }
 
 # =========================
-# 7. Main Processing
+# 6. CLEANING
 # =========================
-def process_all_jobs():
-    input_file = "../scraper/jobs_raws.json"
-    output_file = "../data/jobs_dataset.csv"
+def clean_base(data):
+    return {
+        "job_title": str(data.get("job_title", "")).strip(),
+        "company": str(data.get("company", "")).strip(),
+        "experience_years": data.get("experience_years"),
+        "salary_min": data.get("salary_min"),  # no fake defaults
+        "remote_friendly": int(data.get("remote_friendly", 0))
+    }
 
-    if not os.path.exists(input_file):
-        print(f"❌ Error: {input_file} not found.")
-        return
+# =========================
+# 7. MAIN PIPELINE
+# =========================
+def process_jobs():
+    input_file = "../scraper/jobs_raws.json"
+
+    tech_jobs, medical_jobs, finance_jobs, other_jobs = [], [], [], []
 
     with open(input_file, 'r', encoding='utf-8') as f:
-        raw_jobs = json.load(f)
+        jobs = json.load(f)
 
-    processed_data = []
+    print(f" Processing {len(jobs)} jobs...")
 
-    print(f"🚀 Processing {len(raw_jobs)} jobs...")
-
-    for job in tqdm(raw_jobs, desc="Extracting"):
+    for job in tqdm(jobs):
         desc = job.get("description", "")
+        title = job.get("job_title", "")
 
         if not desc:
             continue
 
-        try:
-            # LLM extraction
-            features = chain.invoke({
-                "description": desc[:1000],
-                "format_instructions": parser.get_format_instructions()
-            })
+        category = detect_category(title, desc)
 
-        except Exception:
-            # Fallback if LLM fails
-            features = fallback_extract(desc)
-
-            # Log failure
-            with open("failed_jobs.log", "a", encoding="utf-8") as log:
-                log.write(desc[:300] + "\n\n")
-
-        # Clean data
-        features = clean_features(features)
-
-        # Override salary with regex (more reliable)
-        features["salary_min_k"] = extract_salary(desc)
-
-        processed_data.append({
-            "job_title": job.get("job_title"),
+        base = {
+            "job_title": title,
             "company": job.get("company"),
-            **features
-        })
+            "experience_years": extract_experience(desc),
+            "salary_min": extract_salary(desc),
+            "remote_friendly": extract_remote(desc)
+        }
 
-        time.sleep(0.3)
+        base = clean_base(base)
+
+        # add category-specific features
+        if category == "tech":
+            base.update(extract_tech(desc))
+            tech_jobs.append(base)
+
+        elif category == "medical":
+            base.update(extract_medical(desc))
+            medical_jobs.append(base)
+
+        elif category == "finance":
+            base.update(extract_finance(desc))
+            finance_jobs.append(base)
+
+        else:
+            other_jobs.append(base)
 
     # =========================
-    # Save Output
+    # SAVE FILES
     # =========================
-    if processed_data:
-        df = pd.DataFrame(processed_data)
+    os.makedirs("../data", exist_ok=True)
 
-        os.makedirs("../data", exist_ok=True)
-        df.to_csv(output_file, index=False)
+    pd.DataFrame(tech_jobs).drop_duplicates().to_csv("../data/tech_jobs.csv", index=False)
+    pd.DataFrame(medical_jobs).drop_duplicates().to_csv("../data/medical_jobs.csv", index=False)
+    pd.DataFrame(finance_jobs).drop_duplicates().to_csv("../data/finance_jobs.csv", index=False)
+    pd.DataFrame(other_jobs).drop_duplicates().to_csv("../data/other_jobs.csv", index=False)
 
-        print(f"\n✅ Done! {len(processed_data)} jobs saved to {output_file}")
-    else:
-        print("\n❌ No data processed.")
+    # =========================
+    # LOGGING
+    # =========================
+    print("\n DONE!")
+    print(f"Tech jobs: {len(tech_jobs)}")
+    print(f"Medical jobs: {len(medical_jobs)}")
+    print(f"Finance jobs: {len(finance_jobs)}")
+    print(f"Other jobs: {len(other_jobs)}")
 
 # =========================
-# 8. Run Script
+# RUN
 # =========================
 if __name__ == "__main__":
-    process_all_jobs()
+    process_jobs()
