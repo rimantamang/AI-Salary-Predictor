@@ -1,69 +1,35 @@
-#  Feature Extraction Pipeline (My Contribution)
+#  AI-Powered Feature Extraction Pipeline
 
-This part of the project focuses on transforming raw job data into a structured dataset using AI-based processing.
+##  My Role
+My responsibility in this project was to design and implement the **LLM Extraction Layer**. This involves taking raw, unstructured job data (JSON) and transforming it into a structured format (CSV) that can be used to train our Salary Prediction machine learning models.
 
-I built a data processing pipeline using LangChain and Hugging Face models to extract meaningful features from unstructured job listings.
+## ⚙️ How the Pipeline Works
 
----
+### 1. Data Orchestration
+I used **LangChain** to create a structured processing chain. This connects our raw input text to the **Llama-3.1-8B** model (hosted on **Groq**) to perform high-speed natural language analysis.
 
-##  What I Did
+### 2. Schema Enforcement & Validation
+To ensure the data is "clean" for the Data Science team, I implemented **Pydantic** models. This forces the AI to extract exactly what we need in a strict format:
+*   **Categories**: Maps jobs into specific sectors (Tech, Medical, Finance, etc.).
+*   **Numerical Features**: Extracts years of experience and minimum salary as integers.
+*   **Skill Binary Flags**: Identifies the presence of 5 core skill sets:
+    *   `IT_skill` (Coding/Data)
+    *   `Medical_skill` (Clinical/Healthcare)
+    *   `Financial_skill` (Accounting/Banking)
+    *   `Business_skill` (Management/Sales)
+    *   `Technical_skill` (Engineering/Trades like Plumbing & Electrical)
 
-- Developed a script to process raw job data (`jobs_raws.json`)
-- Used AI models to extract structured information such as:
-  - Job title
-  - Skills
-  - Experience level
-  - Salary (if available)
-- Designed prompts to guide the model for consistent outputs
-- Validated outputs using Pydantic models
-- Converted processed data into a clean CSV file (`jobs_dataset.csv`)
-- Implemented logging for failed or incomplete extractions
+### 3. Error Handling & Persistence
+The script is designed for reliability:
+*   **Persistence**: Uses a `try-finally` block to ensure that if the script crashes or is stopped, all data processed up to that point is saved to `jobs_dataset.csv`.
+*   **Rate Limiting**: Includes automated time delays to respect Groq's API limits.
+*   **Context Management**: Automatically truncates long job descriptions to optimize token usage and cost.
 
----
-
-##  How It Works
-
-1. Load raw job data from JSON  
-2. Send each job entry to the language model  
-3. Extract structured fields using prompt + parsing  
-4. Validate the response format  
-5. Save results into a CSV file  
-6. Log errors into `failed_jobs.log`  
-
----
-
-##  Technologies Used
-
-- Python  
-- LangChain  
-- Hugging Face API  
-- Pandas  
-- Pydantic  
-- dotenv  
-- tqdm  
-
----
-
-##  Key Files
-
-- `extract_features.py` → Main processing script  
-- `.env` → Stores API key  
-- `failed_jobs.log` → Tracks failed cases  
-- `jobs_dataset.csv` → Final structured dataset  
-
----
-
-##  Output
-
-The pipeline generates a structured dataset from raw job listings, making it suitable for:
-
-- Machine learning models  
-- Salary prediction  
-- Data analysis  
-
----
-
-
-## Summary
-
-This component automates the conversion of unstructured job data into a clean, structured format using AI, forming a critical step for downstream analysis and modeling.
+##  How to Run
+1. Navigate to the `langchain_processor` folder.
+2. Ensure your `.env` file contains your `GROQ_API_KEY`.
+3. Run the script:
+   ```bash
+   python extract_features.py
+   ```
+4. The output will be generated at `../data/jobs_dataset.csv`.

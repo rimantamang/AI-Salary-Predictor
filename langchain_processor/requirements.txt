@@ -8,3 +8,4 @@ pydantic
 beautifulsoup4
 tqdm
 langchain-huggingface
+langchain_openai

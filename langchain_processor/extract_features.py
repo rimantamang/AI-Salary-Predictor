@@ -1,193 +1,96 @@
 import os
 import json
-import re
+import time
 import pandas as pd
 from tqdm import tqdm
+from typing import List
+from dotenv import load_dotenv
+from langchain_groq import ChatGroq
+from pydantic import BaseModel, Field 
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.prompts import PromptTemplate
 
-# =========================
-# 1. CATEGORY DETECTION
-# =========================
-def detect_category(title, desc):
-    text = (title + " " + desc).lower()
+# --- 1. SETUP ---
+load_dotenv() 
+groq_api_key = os.getenv("GROQ_API_KEY")
 
-    # prioritize skills over generic titles
-    if any(k in text for k in ["python", "developer", "software", "backend", "frontend", "aws"]):
-        return "tech"
-    elif any(k in text for k in ["nurse", "doctor", "clinical", "medical", "health"]):
-        return "medical"
-    elif any(k in text for k in ["finance", "analyst", "account", "bank", "financial"]):
-        return "finance"
-    else:
-        return "other"
+llm = ChatGroq(
+    model_name="llama-3.1-8b-instant",
+    temperature=0,
+    groq_api_key=groq_api_key
+)
 
-# =========================
-# 2. EXPERIENCE EXTRACTION
-# =========================
-def extract_experience(desc):
-    desc = desc.lower()
+# --- 2. THE SCHEMA (Updated: Batching enabled, technical_skill removed) ---
+class JobFeatures(BaseModel):
+    category: str = Field(description="One of: tech, medical, finance, other")
+    experience_years: int = Field(description="Numeric years of experience. Default to 0.")
+    salary_min: int = Field(description="Lower bound annual salary. Default to 0.")
+    remote_friendly: int = Field(description="1 if remote/WFH/hybrid, 0 if office")
+    it_skill: int = Field(description="1 if coding/software/data/IT, else 0")
+    medical_skill: int = Field(description="1 if healthcare/nursing/clinical, else 0")
+    financial_skill: int = Field(description="1 if accounting/banking/finance, else 0")
+    business_skill: int = Field(description="1 if management/sales/marketing/ops, else 0")
 
-    # match "3-5 years" or "2 to 4 years"
-    match = re.search(r'(\d+)\s?[-to]+\s?(\d+)\s*(years|yrs)', desc)
-    if match:
-        return int(match.group(1))
+class JobBatch(BaseModel):
+    jobs: List[JobFeatures]
 
-    # match "3+ years"
-    match = re.search(r'(\d+)\+?\s*(years|yrs)', desc)
-    if match:
-        return int(match.group(1))
+parser = PydanticOutputParser(pydantic_object=JobBatch)
 
-    # fallback using keywords
-    if "senior" in desc:
-        return 5
-    if "mid" in desc:
-        return 3
-    if "junior" in desc or "entry" in desc:
-        return 1
+prompt = PromptTemplate(
+    template="Analyze these {count} jobs and extract features for EACH. Respond ONLY with valid JSON.\n{format_instructions}\nJobs:\n{jobs_text}",
+    input_variables=["jobs_text", "count"],
+    partial_variables={"format_instructions": parser.get_format_instructions()},
+)
 
-    return None
+chain = prompt | llm | parser
 
-# =========================
-# 3. SALARY EXTRACTION
-# =========================
-def extract_salary(desc):
-    desc = desc.lower().replace(",", "")
+# --- 3. THE PIPELINE ---
+def process_to_master_csv():
+    input_file = "../scraper/jobs_raws.json" 
+    output_file = "../data/jobs_dataset.csv"
+    batch_size = 5 
 
-    # only consider salary-related context
-    if not any(k in desc for k in ["salary", "pay", "$", "₹"]):
-        return None
-
-    # range: 50000-70000
-    match = re.search(r'(\d{5,6})\s?[-to]+\s?(\d{5,6})', desc)
-    if match:
-        return int(match.group(1))
-
-    # single number
-    match = re.search(r'\b(\d{5,6})\b', desc)
-    if match:
-        return int(match.group(1))
-
-    # 50k format
-    match = re.search(r'(\d{2,3})\s?k', desc)
-    if match:
-        return int(match.group(1)) * 1000
-
-    return None
-
-# =========================
-# 4. REMOTE DETECTION
-# =========================
-def extract_remote(desc):
-    keywords = ["remote", "work from home", "wfh", "anywhere"]
-    return int(any(k in desc.lower() for k in keywords))
-
-# =========================
-# 5. CATEGORY FEATURES
-# =========================
-def extract_tech(desc):
-    desc = desc.lower()
-    return {
-        "python_skill": int("python" in desc),
-        "django_skill": int("django" in desc),
-        "aws_skill": int("aws" in desc or "amazon web services" in desc)
-    }
-
-def extract_medical(desc):
-    desc = desc.lower()
-    return {
-        "medical_license": int("license" in desc),
-        "patient_care": int("patient" in desc),
-        "clinical_experience": int("clinical" in desc)
-    }
-
-def extract_finance(desc):
-    desc = desc.lower()
-    return {
-        "financial_analysis": int("analysis" in desc),
-        "risk_management": int("risk" in desc),
-        "accounting": int("account" in desc)
-    }
-
-# =========================
-# 6. CLEANING
-# =========================
-def clean_base(data):
-    return {
-        "job_title": str(data.get("job_title", "")).strip(),
-        "company": str(data.get("company", "")).strip(),
-        "experience_years": data.get("experience_years"),
-        "salary_min": data.get("salary_min"),  # no fake defaults
-        "remote_friendly": int(data.get("remote_friendly", 0))
-    }
-
-# =========================
-# 7. MAIN PIPELINE
-# =========================
-def process_jobs():
-    input_file = "../scraper/jobs_raws.json"
-
-    tech_jobs, medical_jobs, finance_jobs, other_jobs = [], [], [], []
+    if not os.path.exists(input_file): return
 
     with open(input_file, 'r', encoding='utf-8') as f:
         jobs = json.load(f)
 
-    print(f" Processing {len(jobs)} jobs...")
+    processed_data = []
+    print(f"🚀 Starting BATCH extraction (Size: {batch_size}) for {len(jobs)} jobs...")
 
-    for job in tqdm(jobs):
-        desc = job.get("description", "")
-        title = job.get("job_title", "")
+    try:
+        # Step through the list in chunks of 5
+        for i in tqdm(range(0, len(jobs), batch_size)): 
+            chunk = jobs[i:i + batch_size]
+            try:
+                jobs_text = ""
+                for idx, j in enumerate(chunk):
+                    # Aggressive truncation (800 chars) for speed
+                    jobs_text += f"--- JOB {idx} ---\nTitle: {j.get('job_title')}\nDesc: {j.get('description', '')[:800]}\n\n"
+                
+                response = chain.invoke({"jobs_text": jobs_text, "count": len(chunk)})
+                
+                for idx, features in enumerate(response.jobs):
+                    # Using model_dump() to avoid the Pydantic warning
+                    record = {
+                        "job_title": chunk[idx].get("job_title"),
+                        "company": chunk[idx].get("company"),
+                        **features.model_dump()
+                    }
+                    processed_data.append(record)
+                
+                time.sleep(1.5) 
 
-        if not desc:
-            continue
+            except Exception as e:
+                # If a batch fails, we don't want to stop the whole script
+                print(f"Error in batch starting at index {i}: {e}")
+                continue
+    finally:
+        if processed_data:
+            os.makedirs("../data", exist_ok=True)
+            df = pd.DataFrame(processed_data)
+            df.to_csv(output_file, index=False)
+            print(f"\n✅ SUCCESS! {len(df)} records saved to {output_file}")
 
-        category = detect_category(title, desc)
-
-        base = {
-            "job_title": title,
-            "company": job.get("company"),
-            "experience_years": extract_experience(desc),
-            "salary_min": extract_salary(desc),
-            "remote_friendly": extract_remote(desc)
-        }
-
-        base = clean_base(base)
-
-        # add category-specific features
-        if category == "tech":
-            base.update(extract_tech(desc))
-            tech_jobs.append(base)
-
-        elif category == "medical":
-            base.update(extract_medical(desc))
-            medical_jobs.append(base)
-
-        elif category == "finance":
-            base.update(extract_finance(desc))
-            finance_jobs.append(base)
-
-        else:
-            other_jobs.append(base)
-
-    # =========================
-    # SAVE FILES
-    # =========================
-    os.makedirs("../data", exist_ok=True)
-
-    pd.DataFrame(tech_jobs).drop_duplicates().to_csv("../data/tech_jobs.csv", index=False)
-    pd.DataFrame(medical_jobs).drop_duplicates().to_csv("../data/medical_jobs.csv", index=False)
-    pd.DataFrame(finance_jobs).drop_duplicates().to_csv("../data/finance_jobs.csv", index=False)
-    pd.DataFrame(other_jobs).drop_duplicates().to_csv("../data/other_jobs.csv", index=False)
-
-    # =========================
-    # LOGGING
-    # =========================
-    print("\n DONE!")
-    print(f"Tech jobs: {len(tech_jobs)}")
-    print(f"Medical jobs: {len(medical_jobs)}")
-    print(f"Finance jobs: {len(finance_jobs)}")
-    print(f"Other jobs: {len(other_jobs)}")
-
-# =========================
-# RUN
-# =========================
 if __name__ == "__main__":
-    process_jobs()
+    process_to_master_csv()
